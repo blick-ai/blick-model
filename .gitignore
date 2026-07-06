@@ -216,3 +216,20 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# dados de dataset
+data/raw/
+data/processed/
+*.jpg
+*.jpeg
+*.png
+*.JPG
+*.JPEG
+*.PNG
+
+# exceções
+!data/manifest.csv
+
+# pesos de modelo — mudam a cada treino
+checkpoints/
+*.pth

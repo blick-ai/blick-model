@@ -1,0 +1,350 @@
+# -*- coding: utf-8 -*-
+"""
+train.py
+--------
+Treina o classificador fitossanitario do Blick a partir do manifesto
+gerado pelo `data/prepare_dataset.py`.
+
+ARQUITETURA: um unico backbone (ResNet34 pre-treinado no ImageNet) com
+DUAS CABECAS de saida:
+  1. status_geral  -> saudavel / praga / doenca         (robusta, bem populada)
+  2. subtipo       -> a classe especifica (Cercosporiose, Ferrugem_Comum, ...)
+
+Por que hierarquico e nao um classificador unico de ~20 classes: as classes
+de subtipo tem volume bem desigual (de 113 a 6387 imagens — ver relatorio
+de auditoria do prepare_dataset.py), entao a cabeca de subtipo vai errar
+mais nas classes raras. Com a cabeca de status_geral treinada em paralelo
+sobre grupos bem mais populosos, o sistema ainda da um resultado confiavel
+("tem doenca") mesmo quando erra o subtipo exato — o que ja e util pro
+dashboard (alerta + recomendacao generica), com o subtipo refinando a
+recomendacao quando a confianca permitir.
+
+MITIGACAO DO VIES DE FUNDO: a auditoria do prepare_dataset.py mostrou que
+a maioria das classes de doenca/praga tem 80-98% de imagens com fundo de
+estudio na BORDA, contra 20-30% nas imagens saudaveis — um atalho que o
+modelo poderia aprender em vez da lesao em si. A mitigacao usada aqui e
+fazer o RandomResizedCrop cortar bem fundo na imagem (scale minimo 0.4),
+o que na maioria das vezes remove justamente a faixa de borda onde o fundo
+de estudio aparece.
+
+AVISO IMPORTANTE SOBRE VALIDACAO: por enquanto, o manifesto so tem imagens
+de datasets de internet/professor (fundo de estudio), sem fotos de campo
+reais do Klar. Isso significa que a acuracia de validacao reportada aqui
+NAO garante desempenho em campo — ela mede se o modelo generaliza dentro do
+mesmo estilo fotografico, nao para o estilo real de captura do rover. Assim
+que houver fotos rotuladas do Klar (ou do PlantDoc), adicione a origem
+delas em ORIGENS_VALIDACAO_CAMPO abaixo para que sirvam de validacao real.
+
+Exemplo de uso:
+    python3 train.py --manifest ../data/manifest.csv --epochs 15
+"""
+
+import os
+import json
+import time
+import argparse
+from collections import Counter
+
+import pandas as pd
+import numpy as np
+from PIL import Image
+
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torchvision import models, transforms
+
+
+# ---------------------------------------------------------------------------
+# Configuracao
+# ---------------------------------------------------------------------------
+# Tamanho de entrada e backbone tem default leve (ResNet18, 160px) pensado
+# para rodar em CPU numa maquina local. Se um dia o treino migrar pra GPU
+# (Colab/SageMaker), use --backbone resnet34 --img-size 224 pra ter mais
+# capacidade — a arquitetura aceita ambos sem mudar nada mais no codigo.
+IMG_SIZE_PADRAO = 160
+
+# Origens que representam fotos de campo reais (nao fundo de estudio).
+# Se alguma dessas origens existir no manifesto, TODAS as imagens dela vao
+# pra validacao (nunca pro treino) — sao poucas e preciosas, medem o que
+# realmente importa: desempenho no estilo de captura do Klar.
+ORIGENS_VALIDACAO_CAMPO = {"klar", "plantdoc"}
+
+STATUS_LABELS = ["saudavel", "praga", "doenca"]
+
+
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
+class BlickLeafDataset(Dataset):
+    def __init__(self, df, classe_para_idx, transform):
+        self.df = df.reset_index(drop=True)
+        self.classe_para_idx = classe_para_idx
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        linha = self.df.iloc[idx]
+        img = Image.open(linha["caminho_processado"]).convert("RGB")
+        img = self.transform(img)
+
+        idx_subtipo = self.classe_para_idx[linha["classe"]]
+        idx_status = STATUS_LABELS.index(linha["status_geral"])
+        return img, idx_status, idx_subtipo
+
+
+def montar_transforms(treino: bool, img_size: int):
+    if treino:
+        # RandomResizedCrop com scale minimo agressivo (0.4) e a principal
+        # mitigacao contra o vies de fundo de estudio detectado na auditoria:
+        # na maior parte das vezes, corta a faixa de borda onde o fundo
+        # aparece, forcando o modelo a olhar pra textura da lesao no centro.
+        return transforms.Compose([
+            transforms.RandomResizedCrop(img_size, scale=(0.4, 1.0)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+    else:
+        return transforms.Compose([
+            transforms.Resize((img_size, img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+
+# ---------------------------------------------------------------------------
+# Modelo: backbone compartilhado + duas cabecas
+# ---------------------------------------------------------------------------
+class ClassificadorHierarquico(nn.Module):
+    def __init__(self, n_subtipos, backbone_nome="resnet18", pretrained=True):
+        super().__init__()
+
+        if backbone_nome == "resnet18":
+            pesos = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+            backbone = models.resnet18(weights=pesos)
+        elif backbone_nome == "resnet34":
+            pesos = models.ResNet34_Weights.IMAGENET1K_V1 if pretrained else None
+            backbone = models.resnet34(weights=pesos)
+        else:
+            raise ValueError(f"backbone desconhecido: {backbone_nome!r} (use 'resnet18' ou 'resnet34')")
+
+        n_features = backbone.fc.in_features
+        backbone.fc = nn.Identity()  # remove a cabeca original, vira so extrator de features
+        self.backbone = backbone
+
+        self.cabeca_status = nn.Linear(n_features, len(STATUS_LABELS))
+        self.cabeca_subtipo = nn.Linear(n_features, n_subtipos)
+
+    def forward(self, x):
+        features = self.backbone(x)
+        return self.cabeca_status(features), self.cabeca_subtipo(features)
+
+
+# ---------------------------------------------------------------------------
+# Preparacao dos dados
+# ---------------------------------------------------------------------------
+def carregar_e_dividir(manifest_path, val_fraction=0.15, seed=42, limit=None):
+    df = pd.read_csv(manifest_path)
+
+    antes = len(df)
+    df = df[df["status_geral"] != "revisar"]
+    df = df[df["caminho_processado"].notna()]
+    print(f"[TREINO] {antes - len(df)} imagem(ns) excluida(s) (status 'revisar' ou sem imagem processada).")
+
+    if limit:
+        n_classes = df["classe"].nunique()
+        por_classe = max(2, limit // n_classes)
+        partes = [
+            grupo.sample(min(len(grupo), por_classe), random_state=seed)
+            for _, grupo in df.groupby("classe")
+        ]
+        df = pd.concat(partes, ignore_index=True)
+        print(f"[TREINO] --limit ativo: usando amostra reduzida de {len(df)} imagem(ns) (smoke test).")
+
+    print(f"[TREINO] {len(df)} imagem(ns) disponiveis para treino/validacao.")
+
+    tem_campo = df["origem_dataset"].isin(ORIGENS_VALIDACAO_CAMPO)
+    n_campo = tem_campo.sum()
+
+    if n_campo > 0:
+        print(f"[TREINO] {n_campo} imagem(ns) de origem de campo encontrada(s) — reservadas 100% para validacao.")
+        val_df = df[tem_campo]
+        treino_df = df[~tem_campo]
+    else:
+        print("\n" + "!" * 70)
+        print("AVISO: nenhuma origem de campo (Klar/PlantDoc) encontrada no manifesto.")
+        print("A validacao abaixo vai medir generalizacao DENTRO do mesmo estilo")
+        print("fotografico dos datasets da internet/professor, NAO desempenho real")
+        print("em campo. Trate a acuracia de validacao com cautela ate haver fotos")
+        print("de campo rotuladas para validar de verdade.")
+        print("!" * 70 + "\n")
+
+        from sklearn.model_selection import train_test_split
+        treino_df, val_df = train_test_split(
+            df, test_size=val_fraction, random_state=seed, stratify=df["classe"]
+        )
+
+    return treino_df.reset_index(drop=True), val_df.reset_index(drop=True)
+
+
+def calcular_pesos_classe(labels, n_classes):
+    """Peso inversamente proporcional a frequencia, para compensar desbalanceamento."""
+    contagem = Counter(labels)
+    pesos = torch.zeros(n_classes)
+    total = len(labels)
+    for idx in range(n_classes):
+        n = contagem.get(idx, 0)
+        pesos[idx] = total / (n_classes * n) if n > 0 else 0.0
+    return pesos
+
+
+# ---------------------------------------------------------------------------
+# Treino
+# ---------------------------------------------------------------------------
+def treinar(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[TREINO] Usando dispositivo: {device}")
+
+    treino_df, val_df = carregar_e_dividir(args.manifest, val_fraction=args.val_fraction, limit=args.limit)
+
+    classes_ordenadas = sorted(treino_df["classe"].unique())
+    classe_para_idx = {c: i for i, c in enumerate(classes_ordenadas)}
+    idx_para_classe = {i: c for c, i in classe_para_idx.items()}
+
+    # classes que so aparecem na validacao de campo (nao no treino) nao tem
+    # indice — filtra fora, com aviso, em vez de quebrar o treino
+    faltantes = set(val_df["classe"].unique()) - set(classe_para_idx.keys())
+    if faltantes:
+        print(f"[TREINO] AVISO: classes só na validação, sem exemplo no treino, ignoradas: {faltantes}")
+        val_df = val_df[val_df["classe"].isin(classe_para_idx.keys())].reset_index(drop=True)
+
+    ds_treino = BlickLeafDataset(treino_df, classe_para_idx, montar_transforms(treino=True, img_size=args.img_size))
+    ds_val = BlickLeafDataset(val_df, classe_para_idx, montar_transforms(treino=False, img_size=args.img_size))
+
+    dl_treino = DataLoader(ds_treino, batch_size=args.batch_size, shuffle=True,
+                            num_workers=args.workers, pin_memory=True)
+    dl_val = DataLoader(ds_val, batch_size=args.batch_size, shuffle=False,
+                         num_workers=args.workers, pin_memory=True)
+
+    labels_status_treino = [STATUS_LABELS.index(s) for s in treino_df["status_geral"]]
+    labels_subtipo_treino = [classe_para_idx[c] for c in treino_df["classe"]]
+
+    pesos_status = calcular_pesos_classe(labels_status_treino, len(STATUS_LABELS)).to(device)
+    pesos_subtipo = calcular_pesos_classe(labels_subtipo_treino, len(classes_ordenadas)).to(device)
+
+    modelo = ClassificadorHierarquico(n_subtipos=len(classes_ordenadas), backbone_nome=args.backbone).to(device)
+
+    criterio_status = nn.CrossEntropyLoss(weight=pesos_status)
+    criterio_subtipo = nn.CrossEntropyLoss(weight=pesos_subtipo)
+    otimizador = torch.optim.AdamW(modelo.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(otimizador, T_max=args.epochs)
+
+    melhor_acc_status = 0.0
+    os.makedirs(args.output_dir, exist_ok=True)
+    n_lotes = len(dl_treino)
+
+    for epoca in range(1, args.epochs + 1):
+        modelo.train()
+        perda_total = 0.0
+        tempo_inicio_epoca = time.time()
+
+        for i, (imgs, y_status, y_subtipo) in enumerate(dl_treino, 1):
+            imgs, y_status, y_subtipo = imgs.to(device), y_status.to(device), y_subtipo.to(device)
+
+            otimizador.zero_grad()
+            saida_status, saida_subtipo = modelo(imgs)
+
+            # peso maior na cabeca de status: e a saida mais robusta e a
+            # que o dashboard usa primeiro (alerta geral)
+            perda = criterio_status(saida_status, y_status) + 0.5 * criterio_subtipo(saida_subtipo, y_subtipo)
+
+            perda.backward()
+            otimizador.step()
+            perda_total += perda.item() * imgs.size(0)
+
+            if i % 10 == 0 or i == n_lotes:
+                decorrido = time.time() - tempo_inicio_epoca
+                seg_por_lote = decorrido / i
+                restante = seg_por_lote * (n_lotes - i)
+                print(f"  [TREINO] lote {i}/{n_lotes} — perda: {perda.item():.4f} — "
+                      f"~{restante/60:.1f} min restantes nesta época", end="\r")
+
+        print()  # quebra a linha do \r antes do resumo da epoca
+        scheduler.step()
+        perda_media = perda_total / len(ds_treino)
+
+        acc_status, acc_subtipo = avaliar(modelo, dl_val, device)
+        print(f"[TREINO] Epoca {epoca}/{args.epochs} — perda: {perda_media:.4f} | "
+              f"val status_geral: {acc_status*100:.1f}% | val subtipo: {acc_subtipo*100:.1f}%")
+
+        if acc_status > melhor_acc_status:
+            melhor_acc_status = acc_status
+            caminho_checkpoint = os.path.join(args.output_dir, "modelo_melhor.pth")
+            torch.save(modelo.state_dict(), caminho_checkpoint)
+            print(f"  [TREINO] Novo melhor modelo salvo em {caminho_checkpoint}")
+
+    # metadados necessarios para reconstruir o modelo no inference.py do SageMaker
+    metadados = {
+        "status_labels": STATUS_LABELS,
+        "classe_para_idx": classe_para_idx,
+        "idx_para_classe": idx_para_classe,
+        "img_size": args.img_size,
+        "backbone": args.backbone,
+        "normalizacao_media": [0.485, 0.456, 0.406],
+        "normalizacao_desvio": [0.229, 0.224, 0.225],
+    }
+    with open(os.path.join(args.output_dir, "metadados.json"), "w", encoding="utf-8") as f:
+        json.dump(metadados, f, ensure_ascii=False, indent=2)
+
+    print(f"\n[TREINO] Concluido. Melhor acurácia de status_geral na validação: {melhor_acc_status*100:.1f}%")
+    print(f"[TREINO] Metadados salvos em {args.output_dir}/metadados.json")
+
+
+def avaliar(modelo, dl_val, device):
+    modelo.eval()
+    acertos_status = acertos_subtipo = total = 0
+
+    with torch.no_grad():
+        for imgs, y_status, y_subtipo in dl_val:
+            imgs, y_status, y_subtipo = imgs.to(device), y_status.to(device), y_subtipo.to(device)
+            saida_status, saida_subtipo = modelo(imgs)
+
+            acertos_status += (saida_status.argmax(1) == y_status).sum().item()
+            acertos_subtipo += (saida_subtipo.argmax(1) == y_subtipo).sum().item()
+            total += imgs.size(0)
+
+    if total == 0:
+        return 0.0, 0.0
+    return acertos_status / total, acertos_subtipo / total
+
+
+# ---------------------------------------------------------------------------
+# Principal
+# ---------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Treina o classificador hierárquico do Blick.")
+    parser.add_argument("--manifest", default="../data/manifest.csv")
+    parser.add_argument("--output-dir", default="./checkpoints")
+    parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--val-fraction", type=float, default=0.15)
+    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--backbone", choices=["resnet18", "resnet34"], default="resnet18",
+                         help="resnet18 (padrão, mais leve/rápido em CPU) ou resnet34 (mais capacidade, use com GPU).")
+    parser.add_argument("--img-size", type=int, default=IMG_SIZE_PADRAO,
+                         help=f"Tamanho da imagem de entrada (padrão: {IMG_SIZE_PADRAO}px, mais leve em CPU).")
+    parser.add_argument("--limit", type=int, default=None,
+                         help="Usa uma amostra reduzida (N imagens no total, estratificada por classe) — "
+                              "para testar rápido em CPU antes do treino completo.")
+    args = parser.parse_args()
+
+    treinar(args)
+
+
+if __name__ == "__main__":
+    main()
