@@ -65,10 +65,12 @@ from torchvision import models, transforms
 IMG_SIZE_PADRAO = 160
 
 # Origens que representam fotos de campo reais (nao fundo de estudio).
-# Se alguma dessas origens existir no manifesto, TODAS as imagens dela vao
-# pra validacao (nunca pro treino) — sao poucas e preciosas, medem o que
-# realmente importa: desempenho no estilo de captura do Klar.
-ORIGENS_VALIDACAO_CAMPO = {"klar", "plantdoc"}
+# Se alguma origem COMECAR com um destes prefixos (case-insensitive), TODAS
+# as imagens dela vao pra validacao (nunca pro treino) — sao poucas e
+# preciosas, medem o que realmente importa: desempenho no estilo de
+# captura do Klar. Prefixo em vez de nome exato de proposito: evita quebrar
+# se um lote novo for organizado como "klar_novo", "klar_lote2", etc.
+PREFIXOS_VALIDACAO_CAMPO = ("klar", "plantdoc")
 
 STATUS_LABELS = ["saudavel", "praga", "doenca"]
 
@@ -90,7 +92,10 @@ class BlickLeafDataset(Dataset):
         img = Image.open(linha["caminho_processado"]).convert("RGB")
         img = self.transform(img)
 
-        idx_subtipo = self.classe_para_idx[linha["classe"]]
+        # -1 quando a classe so existe na validacao de campo, sem indice de
+        # treino (ex.: Outra_Praga vindo so do Klar) — a imagem ainda entra
+        # na avaliacao de status_geral, so fica de fora da metrica de subtipo
+        idx_subtipo = self.classe_para_idx.get(linha["classe"], -1)
         idx_status = STATUS_LABELS.index(linha["status_geral"])
         return img, idx_status, idx_subtipo
 
@@ -167,7 +172,7 @@ def carregar_e_dividir(manifest_path, val_fraction=0.15, seed=42, limit=None):
 
     print(f"[TREINO] {len(df)} imagem(ns) disponiveis para treino/validacao.")
 
-    tem_campo = df["origem_dataset"].isin(ORIGENS_VALIDACAO_CAMPO)
+    tem_campo = df["origem_dataset"].str.lower().str.startswith(PREFIXOS_VALIDACAO_CAMPO)
     n_campo = tem_campo.sum()
 
     if n_campo > 0:
@@ -211,16 +216,31 @@ def treinar(args):
 
     treino_df, val_df = carregar_e_dividir(args.manifest, val_fraction=args.val_fraction, limit=args.limit)
 
-    classes_ordenadas = sorted(treino_df["classe"].unique())
-    classe_para_idx = {c: i for i, c in enumerate(classes_ordenadas)}
-    idx_para_classe = {i: c for c, i in classe_para_idx.items()}
+    if args.treinar_subtipo:
+        classes_ordenadas = sorted(treino_df["classe"].unique())
+        classe_para_idx = {c: i for i, c in enumerate(classes_ordenadas)}
+        idx_para_classe = {i: c for c, i in classe_para_idx.items()}
 
-    # classes que so aparecem na validacao de campo (nao no treino) nao tem
-    # indice — filtra fora, com aviso, em vez de quebrar o treino
-    faltantes = set(val_df["classe"].unique()) - set(classe_para_idx.keys())
-    if faltantes:
-        print(f"[TREINO] AVISO: classes só na validação, sem exemplo no treino, ignoradas: {faltantes}")
-        val_df = val_df[val_df["classe"].isin(classe_para_idx.keys())].reset_index(drop=True)
+        # classes que so aparecem na validacao de campo (nao no treino) nao tem
+        # indice de subtipo — mas continuam validas pra avaliar status_geral
+        # (ver BlickLeafDataset.__getitem__, que usa -1 como sentinela nesse caso)
+        faltantes = set(val_df["classe"].unique()) - set(classe_para_idx.keys())
+        if faltantes:
+            n_afetadas = val_df["classe"].isin(faltantes).sum()
+            print(f"[TREINO] AVISO: {n_afetadas} imagem(ns) de classe(s) só na validação "
+                  f"(sem exemplo no treino: {faltantes}) — mantidas na avaliação de "
+                  f"status_geral, mas sem métrica de subtipo (nunca viram treino pra isso).")
+    else:
+        # subtipo desativado: todas as imagens recebem o sentinela -1 (ver
+        # BlickLeafDataset.__getitem__), entao a metrica/perda de subtipo
+        # simplesmente nao roda. O modelo treina so pro essencial: saudavel
+        # / praga / doenca. Reative com --treinar-subtipo quando houver
+        # dado suficiente por classe especifica pra isso valer a pena.
+        print("[TREINO] Cabeça de subtipo DESATIVADA nesta rodada — treinando só "
+              "saudável/praga/doença (use --treinar-subtipo pra reativar).")
+        classes_ordenadas = []
+        classe_para_idx = {}
+        idx_para_classe = {}
 
     ds_treino = BlickLeafDataset(treino_df, classe_para_idx, montar_transforms(treino=True, img_size=args.img_size))
     ds_val = BlickLeafDataset(val_df, classe_para_idx, montar_transforms(treino=False, img_size=args.img_size))
@@ -231,15 +251,21 @@ def treinar(args):
                          num_workers=args.workers, pin_memory=True)
 
     labels_status_treino = [STATUS_LABELS.index(s) for s in treino_df["status_geral"]]
-    labels_subtipo_treino = [classe_para_idx[c] for c in treino_df["classe"]]
-
     pesos_status = calcular_pesos_classe(labels_status_treino, len(STATUS_LABELS)).to(device)
-    pesos_subtipo = calcular_pesos_classe(labels_subtipo_treino, len(classes_ordenadas)).to(device)
 
-    modelo = ClassificadorHierarquico(n_subtipos=len(classes_ordenadas), backbone_nome=args.backbone).to(device)
+    if args.treinar_subtipo:
+        labels_subtipo_treino = [classe_para_idx[c] for c in treino_df["classe"]]
+        pesos_subtipo = calcular_pesos_classe(labels_subtipo_treino, len(classes_ordenadas)).to(device)
+        criterio_subtipo = nn.CrossEntropyLoss(weight=pesos_subtipo)
+    else:
+        criterio_subtipo = None
+
+    # com subtipo desativado, n_subtipos=1 e so um espaco reservado — essa
+    # saida nunca e usada de verdade (loss e accuracy ficam de fora)
+    n_subtipos_modelo = len(classes_ordenadas) if args.treinar_subtipo else 1
+    modelo = ClassificadorHierarquico(n_subtipos=n_subtipos_modelo, backbone_nome=args.backbone).to(device)
 
     criterio_status = nn.CrossEntropyLoss(weight=pesos_status)
-    criterio_subtipo = nn.CrossEntropyLoss(weight=pesos_subtipo)
     otimizador = torch.optim.AdamW(modelo.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(otimizador, T_max=args.epochs)
 
@@ -259,8 +285,14 @@ def treinar(args):
             saida_status, saida_subtipo = modelo(imgs)
 
             # peso maior na cabeca de status: e a saida mais robusta e a
-            # que o dashboard usa primeiro (alerta geral)
-            perda = criterio_status(saida_status, y_status) + 0.5 * criterio_subtipo(saida_subtipo, y_subtipo)
+            # que o dashboard usa primeiro (alerta geral). Subtipo so entra
+            # na conta quando --treinar-subtipo estiver ativo — senao,
+            # y_subtipo e so o sentinela -1 e nem daria pra calcular a perda.
+            perda = criterio_status(saida_status, y_status)
+            if criterio_subtipo is not None:
+                mascara_valida = y_subtipo >= 0
+                if mascara_valida.any():
+                    perda = perda + 0.5 * criterio_subtipo(saida_subtipo[mascara_valida], y_subtipo[mascara_valida])
 
             perda.backward()
             otimizador.step()
@@ -278,8 +310,9 @@ def treinar(args):
         perda_media = perda_total / len(ds_treino)
 
         acc_status, acc_subtipo = avaliar(modelo, dl_val, device)
+        texto_subtipo = f"{acc_subtipo*100:.1f}%" if args.treinar_subtipo else "desativado"
         print(f"[TREINO] Epoca {epoca}/{args.epochs} — perda: {perda_media:.4f} | "
-              f"val status_geral: {acc_status*100:.1f}% | val subtipo: {acc_subtipo*100:.1f}%")
+              f"val status_geral: {acc_status*100:.1f}% | val subtipo: {texto_subtipo}")
 
         if acc_status > melhor_acc_status:
             melhor_acc_status = acc_status
@@ -287,11 +320,28 @@ def treinar(args):
             torch.save(modelo.state_dict(), caminho_checkpoint)
             print(f"  [TREINO] Novo melhor modelo salvo em {caminho_checkpoint}")
 
+    # mapeamento classe -> status geral, derivado direto do manifesto (nao
+    # depende do modelo). Usado na inferencia pra FORCAR coerencia entre as
+    # duas cabecas: o subtipo sugerido so pode vir do grupo que bate com o
+    # status geral ja decidido (ver bug de "praga" + subtipo "Ferrugem_Comum"
+    # discutido na conversa da triagem do S3). So faz sentido com subtipo ativo.
+    if args.treinar_subtipo:
+        classe_para_status = (
+            pd.concat([treino_df, val_df])[["classe", "status_geral"]]
+            .drop_duplicates()
+            .set_index("classe")["status_geral"]
+            .to_dict()
+        )
+    else:
+        classe_para_status = {}
+
     # metadados necessarios para reconstruir o modelo no inference.py do SageMaker
     metadados = {
+        "subtipo_treinado": args.treinar_subtipo,
         "status_labels": STATUS_LABELS,
         "classe_para_idx": classe_para_idx,
         "idx_para_classe": idx_para_classe,
+        "classe_para_status": classe_para_status,
         "img_size": args.img_size,
         "backbone": args.backbone,
         "normalizacao_media": [0.485, 0.456, 0.406],
@@ -306,7 +356,7 @@ def treinar(args):
 
 def avaliar(modelo, dl_val, device):
     modelo.eval()
-    acertos_status = acertos_subtipo = total = 0
+    acertos_status = acertos_subtipo = total = total_com_subtipo = 0
 
     with torch.no_grad():
         for imgs, y_status, y_subtipo in dl_val:
@@ -314,12 +364,19 @@ def avaliar(modelo, dl_val, device):
             saida_status, saida_subtipo = modelo(imgs)
 
             acertos_status += (saida_status.argmax(1) == y_status).sum().item()
-            acertos_subtipo += (saida_subtipo.argmax(1) == y_subtipo).sum().item()
             total += imgs.size(0)
+
+            # -1 = classe sem indice de treino (ver BlickLeafDataset) — nao
+            # entra na metrica de subtipo, mas ja contou acima pro status
+            mascara_valida = y_subtipo >= 0
+            if mascara_valida.any():
+                acertos_subtipo += (saida_subtipo.argmax(1)[mascara_valida] == y_subtipo[mascara_valida]).sum().item()
+                total_com_subtipo += mascara_valida.sum().item()
 
     if total == 0:
         return 0.0, 0.0
-    return acertos_status / total, acertos_subtipo / total
+    acc_subtipo = acertos_subtipo / total_com_subtipo if total_com_subtipo > 0 else 0.0
+    return acertos_status / total, acc_subtipo
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +398,10 @@ def main():
     parser.add_argument("--limit", type=int, default=None,
                          help="Usa uma amostra reduzida (N imagens no total, estratificada por classe) — "
                               "para testar rápido em CPU antes do treino completo.")
+    parser.add_argument("--treinar-subtipo", action="store_true",
+                         help="Ativa a cabeça de subtipo (doença/praga específica). Desativado por "
+                              "padrão — o modelo treina só saudável/praga/doença, mais robusto com "
+                              "o volume de dado por classe específica que temos hoje.")
     args = parser.parse_args()
 
     treinar(args)

@@ -187,6 +187,28 @@ MAPA_CLASSES = {
     # imagem a imagem, ou usar o proprio modelo ja treinado nas classes
     # limpas pra pre-classificar essas 1239 imagens e revisar so as duvidosas.
     "Maize leaf spot": "Outra_Doenca",
+
+    # --- auto-mapeamento: pastas ja nomeadas com o nome da classe final ---
+    # Facilita organizar manualmente lotes novos (ex.: fotos do Klar ja
+    # triadas) sem precisar inventar um nome de pasta bruto so pra bater
+    # com alguma entrada acima. Basta nomear a pasta com o nome canonico
+    # direto (ex.: data/raw/klar/Saudavel/*.jpg) que ja funciona.
+    "Saudavel": "Saudavel",
+    "Cercosporiose": "Cercosporiose",
+    "Ferrugem_Comum": "Ferrugem_Comum",
+    "Mancha_de_Turcicum": "Mancha_de_Turcicum",
+    "Virus_do_Estriamento": "Virus_do_Estriamento",
+    "Ferrugem_Branca": "Ferrugem_Branca",
+    "Mancha_Bipolaris": "Mancha_Bipolaris",
+    "Outra_Doenca": "Outra_Doenca",
+    "Outra_Praga": "Outra_Praga",  # bucket generico p/ praga visivel mas sem especie identificada
+    "Lagarta_do_Cartucho": "Lagarta_do_Cartucho",
+    "Lagarta_da_Espiga": "Lagarta_da_Espiga",
+    "Acaro": "Acaro",
+    "Besouro": "Besouro",
+    "Broca_do_Colmo": "Broca_do_Colmo",
+    "Gafanhoto": "Gafanhoto",
+    "Pulgao": "Pulgao",
 }
 
 
@@ -214,6 +236,7 @@ GRUPO_STATUS = {
     "Broca_do_Colmo": "praga",
     "Gafanhoto": "praga",
     "Pulgao": "praga",
+    "Outra_Praga": "praga",
 }
 
 
@@ -245,10 +268,21 @@ CLASSES_RARAS_PARA_AGRUPAR = frozenset({
 })
 
 
+# Versoes em minusculo, montadas uma unica vez, pra permitir lookup
+# case-insensitive sem duplicar o dicionario inteiro escrito a mao acima.
+# Isso existe porque ja tivemos DUAS vezes o mesmo tipo de bug: pasta
+# criada como "outra_doenca" ou "Outra_doenca" em vez de "Outra_Doenca"
+# fazia cair silenciosamente em NAO_MAPEADA. Com isso, qualquer variacao
+# de maiuscula/minuscula no nome da pasta passa a funcionar igual.
+_CLASSES_DESCARTAR_LOWER = {c.lower() for c in CLASSES_DESCARTAR}
+_MAPA_CLASSES_LOWER = {k.lower(): v for k, v in MAPA_CLASSES.items()}
+
+
 def normalizar_classe(classe_bruta):
     """
     Aplica o MAPA_CLASSES para consolidar nomes de pasta diferentes na
     mesma classe biologica, e agrupa classes raras demais em "Outra_Doenca".
+    A comparacao e case-insensitive (ver comentario acima de _MAPA_CLASSES_LOWER).
 
     Retorna None se a classe deve ser descartada, ou o nome canonico. Se a
     classe bruta nao estiver no mapa, ela NAO e descartada silenciosamente:
@@ -259,11 +293,13 @@ def normalizar_classe(classe_bruta):
     proposito — isso permite rodar em processos separados (multiprocessing)
     sem precisar sincronizar nada entre eles.
     """
-    if classe_bruta in CLASSES_DESCARTAR:
+    classe_bruta_lower = classe_bruta.lower()
+
+    if classe_bruta_lower in _CLASSES_DESCARTAR_LOWER:
         return None
 
-    if classe_bruta in MAPA_CLASSES:
-        classe = MAPA_CLASSES[classe_bruta]
+    if classe_bruta_lower in _MAPA_CLASSES_LOWER:
+        classe = _MAPA_CLASSES_LOWER[classe_bruta_lower]
         if classe in CLASSES_RARAS_PARA_AGRUPAR:
             return "Outra_Doenca"
         return classe
