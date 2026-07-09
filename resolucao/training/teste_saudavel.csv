@@ -1,0 +1,3 @@
+caminho,status_previsto,confianca_status,probabilidades_status,subtipo_previsto,confianca_subtipo,subtipo_sem_filtro
+../../data/raw/klar/Saudavel\1478b478-1071-70c3-379e-a29ad88f04b7__2026__07__04__20260704142945-67d99a93.jpg,saudavel,0.8231,"{'saudavel': 0.8231, 'praga': 0.0, 'doenca': 0.1769}",,,
+../../data/raw/klar/Saudavel\1478b478-1071-70c3-379e-a29ad88f04b7__2026__07__04__20260704144115-63196f0e.jpg,doenca,0.962,"{'saudavel': 0.0323, 'praga': 0.0056, 'doenca': 0.962}",,,

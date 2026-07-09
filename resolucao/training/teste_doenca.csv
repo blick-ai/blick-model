@@ -1,0 +1,5 @@
+caminho,status_previsto,confianca_status,probabilidades_status,subtipo_previsto,confianca_subtipo,subtipo_sem_filtro
+../../data/raw/klar/Outra_Doenca\1478b478-1071-70c3-379e-a29ad88f04b7__2026__07__04__20260704143940-376a01d9.jpg,praga,0.5158,"{'saudavel': 0.0008, 'praga': 0.5158, 'doenca': 0.4833}",,,
+../../data/raw/klar/Outra_Doenca\1478b478-1071-70c3-379e-a29ad88f04b7__2026__07__04__20260704145125-35c0c86c.jpg,doenca,0.7984,"{'saudavel': 0.0055, 'praga': 0.1961, 'doenca': 0.7984}",,,
+../../data/raw/klar/Outra_Doenca\1478b478-1071-70c3-379e-a29ad88f04b7__2026__07__04__20260704145424-25f6db65.jpg,doenca,0.9561,"{'saudavel': 0.0438, 'praga': 0.0001, 'doenca': 0.9561}",,,
+../../data/raw/klar/Outra_Doenca\1478b478-1071-70c3-379e-a29ad88f04b7__2026__07__04__20260704145559-f04dfb70.jpg,doenca,0.9999,"{'saudavel': 0.0, 'praga': 0.0001, 'doenca': 0.9999}",,,

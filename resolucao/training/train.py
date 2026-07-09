@@ -152,7 +152,55 @@ class ClassificadorHierarquico(nn.Module):
 # ---------------------------------------------------------------------------
 # Preparacao dos dados
 # ---------------------------------------------------------------------------
-def carregar_e_dividir(manifest_path, val_fraction=0.15, seed=42, limit=None):
+FRACAO_TREINO_CAMPO_PADRAO = 0.7  # resto vai pra validacao
+LIMIAR_CLASSE_MINIMA_CAMPO = 2    # classes de campo com ate esse tanto de exemplo vao INTEIRAS pro treino
+
+
+def dividir_campo_treino_validacao(df_campo, fracao_treino, seed):
+    """
+    Divide as imagens de campo entre treino e validacao, em vez da regra
+    antiga (100% pra validacao). Reservar tudo pra validacao parecia mais
+    "seguro" pra medir desempenho real, mas na pratica significa que o
+    modelo NUNCA ve um exemplo de campo durante o treino — inclusive
+    "Saudavel" em fundo de mato, que e exatamente o caso que ele mais
+    erra (ver conversa sobre as fotos do FOTOS.zip saindo como
+    doenca/praga quando pareciam saudaveis a olho nu).
+
+    Classes com ate LIMIAR_CLASSE_MINIMA_CAMPO exemplos vao INTEIRAS pro
+    treino: com tao pouco dado, uma validacao de 1-2 imagem(ns) tem poder
+    estatistico proximo de zero mesmo (foi o que aconteceu com Saudavel,
+    n=2 — a divisao 70/30 mandou so 1 pro treino), entao o exemplo vale
+    mais como sinal de treino do que como medida de validacao.
+    """
+    from sklearn.model_selection import train_test_split
+
+    partes_treino, partes_val = [], []
+    for _, grupo in df_campo.groupby("classe"):
+        if len(grupo) <= LIMIAR_CLASSE_MINIMA_CAMPO or fracao_treino >= 1:
+            partes_treino.append(grupo)
+            continue
+        if fracao_treino <= 0:
+            partes_val.append(grupo)
+            continue
+
+        grupo_treino, grupo_val = train_test_split(
+            grupo, train_size=fracao_treino, random_state=seed
+        )
+        if len(grupo_treino) == 0:
+            grupo_treino, grupo_val = grupo.iloc[:1], grupo.iloc[1:]
+        elif len(grupo_val) == 0:
+            grupo_treino, grupo_val = grupo.iloc[:-1], grupo.iloc[-1:]
+
+        partes_treino.append(grupo_treino)
+        partes_val.append(grupo_val)
+
+    treino_campo = pd.concat(partes_treino) if partes_treino else df_campo.iloc[0:0]
+    val_campo = pd.concat(partes_val) if partes_val else df_campo.iloc[0:0]
+    return treino_campo, val_campo
+
+
+def carregar_e_dividir(manifest_path, val_fraction=0.15, seed=42, limit=None,
+                        fracao_treino_campo=FRACAO_TREINO_CAMPO_PADRAO):
     df = pd.read_csv(manifest_path)
 
     antes = len(df)
@@ -176,9 +224,18 @@ def carregar_e_dividir(manifest_path, val_fraction=0.15, seed=42, limit=None):
     n_campo = tem_campo.sum()
 
     if n_campo > 0:
-        print(f"[TREINO] {n_campo} imagem(ns) de origem de campo encontrada(s) — reservadas 100% para validacao.")
-        val_df = df[tem_campo]
-        treino_df = df[~tem_campo]
+        df_campo = df[tem_campo]
+        df_resto = df[~tem_campo]
+
+        treino_campo, val_campo = dividir_campo_treino_validacao(df_campo, fracao_treino_campo, seed)
+        print(f"[TREINO] {n_campo} imagem(ns) de origem de campo: "
+              f"{len(treino_campo)} para treino, {len(val_campo)} para validação "
+              f"(fração configurável via --fracao-treino-campo, padrão {fracao_treino_campo:.0%}).")
+
+        # o restante (internet/prof_wanderson) continua 100% no treino como
+        # antes — o campo e que precisava de ajuste, nao essa parte
+        treino_df = pd.concat([df_resto, treino_campo])
+        val_df = val_campo
     else:
         print("\n" + "!" * 70)
         print("AVISO: nenhuma origem de campo (Klar/PlantDoc) encontrada no manifesto.")
@@ -211,10 +268,22 @@ def calcular_pesos_classe(labels, n_classes):
 # Treino
 # ---------------------------------------------------------------------------
 def treinar(args):
+    # fixa a semente aleatoria ANTES de qualquer coisa (inicializacao das
+    # cabecas do modelo, embaralhamento do DataLoader) — sem isso, dois
+    # treinos com o MESMO codigo e MESMO dado ainda davam resultados
+    # diferentes so por causa da aleatoriedade da inicializacao dos
+    # pesos, o que tornava impossivel saber se uma mudanca de codigo
+    # realmente ajudou ou so foi sorte. Ver conversa sobre 2fc1ce60 e
+    # 20260704_103223 "trocando de lado" entre rodadas sem mudanca de codigo.
+    torch.manual_seed(args.seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[TREINO] Usando dispositivo: {device}")
 
-    treino_df, val_df = carregar_e_dividir(args.manifest, val_fraction=args.val_fraction, limit=args.limit)
+    treino_df, val_df = carregar_e_dividir(
+        args.manifest, val_fraction=args.val_fraction, limit=args.limit,
+        fracao_treino_campo=args.fracao_treino_campo, seed=args.seed,
+    )
 
     if args.treinar_subtipo:
         classes_ordenadas = sorted(treino_df["classe"].unique())
@@ -245,8 +314,11 @@ def treinar(args):
     ds_treino = BlickLeafDataset(treino_df, classe_para_idx, montar_transforms(treino=True, img_size=args.img_size))
     ds_val = BlickLeafDataset(val_df, classe_para_idx, montar_transforms(treino=False, img_size=args.img_size))
 
+    gerador = torch.Generator()
+    gerador.manual_seed(args.seed)
+
     dl_treino = DataLoader(ds_treino, batch_size=args.batch_size, shuffle=True,
-                            num_workers=args.workers, pin_memory=True)
+                            num_workers=args.workers, pin_memory=True, generator=gerador)
     dl_val = DataLoader(ds_val, batch_size=args.batch_size, shuffle=False,
                          num_workers=args.workers, pin_memory=True)
 
@@ -402,6 +474,13 @@ def main():
                          help="Ativa a cabeça de subtipo (doença/praga específica). Desativado por "
                               "padrão — o modelo treina só saudável/praga/doença, mais robusto com "
                               "o volume de dado por classe específica que temos hoje.")
+    parser.add_argument("--fracao-treino-campo", type=float, default=FRACAO_TREINO_CAMPO_PADRAO,
+                         help=f"Fração das fotos de campo (Klar/PlantDoc) usada no treino, o resto "
+                              f"vai pra validação (padrão: {FRACAO_TREINO_CAMPO_PADRAO:.0%}). "
+                              f"Use 0 pra voltar ao comportamento antigo (100%% validação).")
+    parser.add_argument("--seed", type=int, default=42,
+                         help="Semente aleatória — mesmo seed + mesmo dado + mesmo código = mesmo "
+                              "resultado. Mude só se quiser testar sensibilidade a inicialização.")
     args = parser.parse_args()
 
     treinar(args)
