@@ -233,3 +233,5 @@ data/processed/
 # pesos de modelo — mudam a cada treino
 checkpoints/
 *.pth
+*.csv
+*.pyc

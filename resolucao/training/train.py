@@ -422,6 +422,35 @@ def treinar(args):
     with open(os.path.join(args.output_dir, "metadados.json"), "w", encoding="utf-8") as f:
         json.dump(metadados, f, ensure_ascii=False, indent=2)
 
+    # recarrega o MELHOR checkpoint (nao o da ultima epoca) pra listar
+    # exatamente onde ele erra na validacao — fecha o ciclo sem precisar
+    # rodar inferir.py numa pasta separada toda vez que quiser saber quais
+    # fotos especificas o modelo confunde
+    caminho_melhor = os.path.join(args.output_dir, "modelo_melhor.pth")
+    if os.path.exists(caminho_melhor):
+        modelo.load_state_dict(torch.load(caminho_melhor, map_location=device))
+        modelo.eval()
+        transform_val = montar_transforms(treino=False, img_size=args.img_size)
+
+        erros = []
+        with torch.no_grad():
+            for _, linha in val_df.iterrows():
+                img = Image.open(linha["caminho_processado"]).convert("RGB")
+                x = transform_val(img).unsqueeze(0).to(device)
+                saida_status, _ = modelo(x)
+                previsto = STATUS_LABELS[saida_status.argmax(1).item()]
+                real = linha["status_geral"]
+                if previsto != real:
+                    erros.append((os.path.basename(linha["caminho_processado"]), real, previsto, linha["origem_dataset"]))
+
+        if erros:
+            print(f"\n[TREINO] {len(erros)} imagem(ns) de validação onde o modelo (melhor checkpoint) errou:")
+            for nome, real, previsto, origem in erros:
+                print(f"  [{origem}] {nome} — real: {real}, previsto: {previsto}")
+        else:
+            print("\n[TREINO] Nenhum erro na validação com o melhor checkpoint — cuidado, "
+                  "pode ser amostra pequena demais pra tirar conclusão.")
+
     print(f"\n[TREINO] Concluido. Melhor acurácia de status_geral na validação: {melhor_acc_status*100:.1f}%")
     print(f"[TREINO] Metadados salvos em {args.output_dir}/metadados.json")
 
