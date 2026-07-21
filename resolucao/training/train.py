@@ -72,7 +72,7 @@ IMG_SIZE_PADRAO = 160
 # se um lote novo for organizado como "klar_novo", "klar_lote2", etc.
 PREFIXOS_VALIDACAO_CAMPO = ("klar", "plantdoc")
 
-STATUS_LABELS = ["saudavel", "praga", "doenca"]
+STATUS_LABELS = ["saudavel", "praga", "doenca", "nao_milho"]
 
 
 # ---------------------------------------------------------------------------

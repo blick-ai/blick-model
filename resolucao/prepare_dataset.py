@@ -106,7 +106,6 @@ def inferir_classe_e_origem(caminho, raw_dir):
 # dataset do filtro planta/nao-planta do Klar) ou sao genericos demais
 # para virar um rotulo confiavel sem contexto adicional.
 CLASSES_DESCARTAR = {
-    "Not Maize Leaf",
     "img",
     "maize",
     "maize-crops",
@@ -188,6 +187,15 @@ MAPA_CLASSES = {
     # limpas pra pre-classificar essas 1239 imagens e revisar so as duvidosas.
     "Maize leaf spot": "Outra_Doenca",
 
+    # --- categoria de protecao: planta capturada que nao e milho ---
+    # antes descartada (achavamos que era sobra do filtro de borda do
+    # Jetson), agora reaproveitada a pedido do time: o script de captura
+    # do Klar passou a disparar com base em deteccao de cor verde na
+    # cena, o que pode capturar mato/outras plantas por engano. Ter uma
+    # classe propria pra isso evita forcar um veredito de saude sobre uma
+    # foto que nem e milho.
+    "Not Maize Leaf": "Nao_Milho",
+
     # --- auto-mapeamento: pastas ja nomeadas com o nome da classe final ---
     # Facilita organizar manualmente lotes novos (ex.: fotos do Klar ja
     # triadas) sem precisar inventar um nome de pasta bruto so pra bater
@@ -202,6 +210,7 @@ MAPA_CLASSES = {
     "Mancha_Bipolaris": "Mancha_Bipolaris",
     "Outra_Doenca": "Outra_Doenca",
     "Outra_Praga": "Outra_Praga",  # bucket generico p/ praga visivel mas sem especie identificada
+    "Nao_Milho": "Nao_Milho",
     "Lagarta_do_Cartucho": "Lagarta_do_Cartucho",
     "Lagarta_da_Espiga": "Lagarta_da_Espiga",
     "Acaro": "Acaro",
@@ -237,6 +246,8 @@ GRUPO_STATUS = {
     "Gafanhoto": "praga",
     "Pulgao": "praga",
     "Outra_Praga": "praga",
+
+    "Nao_Milho": "nao_milho",
 }
 
 

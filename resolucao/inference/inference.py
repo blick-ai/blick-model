@@ -36,7 +36,7 @@ import torch.nn as nn
 from PIL import Image
 from torchvision import models, transforms
 
-STATUS_LABELS = ["saudavel", "praga", "doenca"]
+STATUS_LABELS = ["saudavel", "praga", "doenca", "nao_milho"]
 
 
 # ---------------------------------------------------------------------------
