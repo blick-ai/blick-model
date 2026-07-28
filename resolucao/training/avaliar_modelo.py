@@ -11,7 +11,7 @@ Roda o modelo treinado sobre o conjunto de validação e gera:
 MOTIVAÇÃO: a acurácia geral (ex.: "94% no subtipo") esconde um problema
 comum em classificadores com muitas classes desbalanceadas — o modelo pode
 estar "empurrando" as classes difíceis pra uma classe genérica (aqui,
-Outra_Doenca ou Outra_Praga) em vez de realmente aprender a diferença
+Doenca ou Outra_Praga) em vez de realmente aprender a diferença
 entre elas. Esse script existe pra detectar isso com números, não achismo.
 
 LEITURA DO RESULTADO:
@@ -21,8 +21,8 @@ LEITURA DO RESULTADO:
     outra coisa).
   - PRECISÃO baixa numa classe = o modelo está "chutando" essa classe com
     frequência quando na verdade era outra (ex.: precisão baixa em
-    Outra_Doenca = o modelo está jogando coisas ali que não deveriam estar).
-  - Se Outra_Doenca tiver RECALL alto mas PRECISÃO baixa, é sinal de que
+    Doenca = o modelo está jogando coisas ali que não deveriam estar).
+  - Se Doenca tiver RECALL alto mas PRECISÃO baixa, é sinal de que
     virou uma "gaveta de bagunça" pra onde o modelo empurra casos difíceis.
 
 Exemplo de uso:
@@ -115,8 +115,8 @@ def avaliar_confusao(args):
               f"— erro mais comum: confundido com '{nomes_classes[idx_erro_comum]}' "
               f"({erros[idx_erro_comum]}x)")
 
-    # checagem direta do "viraram tudo Outra_Doenca/Outra_Praga?"
-    for classe_generica in ("Outra_Doenca", "Outra_Praga"):
+    # checagem direta do "viraram tudo Doenca/Outra_Praga?"
+    for classe_generica in ("Doenca", "Outra_Praga"):
         if classe_generica not in classe_para_idx:
             continue
         idx_generica = classe_para_idx[classe_generica]

@@ -181,11 +181,11 @@ MAPA_CLASSES = {
     # entre si (pustulas arredondadas em alguns exemplos, estrias lineares
     # finas em outros, halo amarelo em estagio avancado em outros ainda) -
     # nao bate de forma consistente nem com Cercosporiose nem com
-    # Ferrugem_Comum. Joga em Outra_Doenca em vez de arriscar contaminar
+    # Ferrugem_Comum. Joga em Doenca em vez de arriscar contaminar
     # uma classe limpa. Se algum dia sobrar tempo, vale re-triar manualmente
     # imagem a imagem, ou usar o proprio modelo ja treinado nas classes
     # limpas pra pre-classificar essas 1239 imagens e revisar so as duvidosas.
-    "Maize leaf spot": "Outra_Doenca",
+    "Maize leaf spot": "Doenca",
 
     # --- categoria de protecao: planta capturada que nao e milho ---
     # antes descartada (achavamos que era sobra do filtro de borda do
@@ -208,7 +208,10 @@ MAPA_CLASSES = {
     "Virus_do_Estriamento": "Virus_do_Estriamento",
     "Ferrugem_Branca": "Ferrugem_Branca",
     "Mancha_Bipolaris": "Mancha_Bipolaris",
-    "Outra_Doenca": "Outra_Doenca",
+    "Doenca": "Doenca",
+    # compatibilidade com pastas antigas ja organizadas como "Outra_Doenca"
+    # antes do renomeio (jul/2026) — nao precisa renomear pasta no disco
+    "Outra_Doenca": "Doenca",
     "Outra_Praga": "Outra_Praga",  # bucket generico p/ praga visivel mas sem especie identificada
     "Nao_Milho": "Nao_Milho",
     "Lagarta_do_Cartucho": "Lagarta_do_Cartucho",
@@ -236,7 +239,7 @@ GRUPO_STATUS = {
     "Virus_do_Estriamento": "doenca",
     "Ferrugem_Branca": "doenca",
     "Mancha_Bipolaris": "doenca",
-    "Outra_Doenca": "doenca",
+    "Doenca": "doenca",
 
     "Lagarta_do_Cartucho": "praga",
     "Lagarta_da_Espiga": "praga",
@@ -264,7 +267,7 @@ def obter_status_geral(classe):
 
 
 # Classes com poucas imagens demais para treinar isoladamente por enquanto
-# (3 a 33 exemplos). Agrupadas num rotulo generico "Outra_Doenca" ate que
+# (3 a 33 exemplos). Agrupadas num rotulo generico "Doenca" ate que
 # haja mais dado — a classe_bruta de cada imagem continua guardando a
 # doenca especifica original, entao e facil "promover" qualquer uma de
 # volta a sua propria classe assim que o volume justificar, sem reprocessar
@@ -282,9 +285,9 @@ CLASSES_RARAS_PARA_AGRUPAR = frozenset({
 # Versoes em minusculo, montadas uma unica vez, pra permitir lookup
 # case-insensitive sem duplicar o dicionario inteiro escrito a mao acima.
 # Isso existe porque ja tivemos DUAS vezes o mesmo tipo de bug: pasta
-# criada como "outra_doenca" ou "Outra_doenca" em vez de "Outra_Doenca"
-# fazia cair silenciosamente em NAO_MAPEADA. Com isso, qualquer variacao
-# de maiuscula/minuscula no nome da pasta passa a funcionar igual.
+# criada como "doenca" ou "Doenca" com variacao de caixa fazia cair
+# silenciosamente em NAO_MAPEADA. Com isso, qualquer variacao de
+# maiuscula/minuscula no nome da pasta passa a funcionar igual.
 _CLASSES_DESCARTAR_LOWER = {c.lower() for c in CLASSES_DESCARTAR}
 _MAPA_CLASSES_LOWER = {k.lower(): v for k, v in MAPA_CLASSES.items()}
 
@@ -292,7 +295,7 @@ _MAPA_CLASSES_LOWER = {k.lower(): v for k, v in MAPA_CLASSES.items()}
 def normalizar_classe(classe_bruta):
     """
     Aplica o MAPA_CLASSES para consolidar nomes de pasta diferentes na
-    mesma classe biologica, e agrupa classes raras demais em "Outra_Doenca".
+    mesma classe biologica, e agrupa classes raras demais em "Doenca".
     A comparacao e case-insensitive (ver comentario acima de _MAPA_CLASSES_LOWER).
 
     Retorna None se a classe deve ser descartada, ou o nome canonico. Se a
@@ -312,7 +315,7 @@ def normalizar_classe(classe_bruta):
     if classe_bruta_lower in _MAPA_CLASSES_LOWER:
         classe = _MAPA_CLASSES_LOWER[classe_bruta_lower]
         if classe in CLASSES_RARAS_PARA_AGRUPAR:
-            return "Outra_Doenca"
+            return "Doenca"
         return classe
 
     return f"NAO_MAPEADA__{classe_bruta}"
