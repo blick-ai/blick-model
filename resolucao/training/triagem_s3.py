@@ -76,13 +76,35 @@ def analisar_enquadramento(caminho):
     return float(maior_regiao / area_verde_total)
 
 
-def baixar_do_s3(bucket, prefixo, destino_bruto):
-    """Baixa todos os objetos de imagem sob o prefixo informado."""
+def _arquivos_ja_processados(destino):
+    """
+    Varre TODAS as subpastas de `destino` (saudavel/, revisar_doenca/,
+    enquadramento_fraco/, etc.) e devolve o conjunto de nomes de arquivo
+    ja presentes em qualquer uma delas. Sem isso, uma foto ja triada e
+    movida pra fora de `_baixadas_do_s3/` parecia "nova" de novo na
+    proxima rodada, e podia ser baixada e classificada uma segunda vez —
+    duas copias da mesma foto, possivelmente com veredito diferente (foi
+    o que aconteceu com a 1583e6af aparecendo em duas pastas diferentes).
+    """
+    if not os.path.isdir(destino):
+        return set()
+    encontrados = set()
+    for _raiz, _dirs, arquivos in os.walk(destino):
+        encontrados.update(arquivos)
+    return encontrados
+
+
+def baixar_do_s3(bucket, prefixo, destino_bruto, destino_completo):
+    """Baixa objetos de imagem sob o prefixo informado, pulando os que ja
+    foram processados (e movidos) em qualquer rodada anterior."""
     os.makedirs(destino_bruto, exist_ok=True)
+    ja_processados = _arquivos_ja_processados(destino_completo)
+
     s3 = boto3.client("s3")
     paginador = s3.get_paginator("list_objects_v2")
 
     baixados = []
+    pulados = 0
     for pagina in paginador.paginate(Bucket=bucket, Prefix=prefixo):
         for obj in pagina.get("Contents", []):
             chave = obj["Key"]
@@ -90,17 +112,24 @@ def baixar_do_s3(bucket, prefixo, destino_bruto):
                 continue
 
             nome_local = chave.replace("/", "__")
-            caminho_local = os.path.join(destino_bruto, nome_local)
 
+            if nome_local in ja_processados:
+                pulados += 1
+                continue
+
+            caminho_local = os.path.join(destino_bruto, nome_local)
             if not os.path.exists(caminho_local):
                 s3.download_file(bucket, chave, caminho_local)
 
             baixados.append(caminho_local)
 
+    if pulados:
+        print(f"[TRIAGEM] {pulados} imagem(ns) já processada(s) em rodada anterior, ignoradas.")
+
     return baixados
 
 
-def classificar_e_organizar(caminhos, destino, checkpoint, metadados_path, limiar_confianca):
+def classificar_e_organizar(caminhos, destino, checkpoint, metadados_path, limiar_confianca, vies_cautela=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     modelo, meta = carregar_modelo(checkpoint, metadados_path, device)
     transform = montar_transform(meta)
@@ -122,7 +151,7 @@ def classificar_e_organizar(caminhos, destino, checkpoint, metadados_path, limia
             continue
 
         try:
-            r = classificar_imagem(caminho, modelo, transform, meta, device, mascara_status)
+            r = classificar_imagem(caminho, modelo, transform, meta, device, mascara_status, vies_cautela)
         except Exception as e:
             print(f"[TRIAGEM] Erro ao processar {caminho}: {e}")
             continue
@@ -160,19 +189,29 @@ def main():
     parser.add_argument("--metadados", default="./checkpoints/metadados.json")
     parser.add_argument("--limiar-confianca", type=float, default=0.75,
                          help="Abaixo disso, a foto vai pra 'revisar_<status>/' (agrupado pela tendência do modelo) em vez de auto-classificada.")
+    parser.add_argument("--cautela-doenca", type=float, default=0.25,
+                         help="Soma esse valor na probabilidade de 'doença' antes de decidir — reduz "
+                              "falso-negativo. Padrão 0.25, calibrado nos testes de jul/2026. Use 0 para desativar.")
+    parser.add_argument("--cautela-praga", type=float, default=0.0, help="Mesma ideia, para 'praga'.")
     args = parser.parse_args()
 
     destino_bruto = os.path.join(args.destino, "_baixadas_do_s3")
     print(f"[TRIAGEM] Baixando de s3://{args.bucket}/{args.prefixo} ...")
-    caminhos = baixar_do_s3(args.bucket, args.prefixo, destino_bruto)
+    caminhos = baixar_do_s3(args.bucket, args.prefixo, destino_bruto, args.destino)
     print(f"[TRIAGEM] {len(caminhos)} imagem(ns) baixada(s).")
 
     if not caminhos:
         print("[TRIAGEM] Nada novo pra classificar.")
         return
 
+    vies_cautela = {}
+    if args.cautela_doenca:
+        vies_cautela["doenca"] = args.cautela_doenca
+    if args.cautela_praga:
+        vies_cautela["praga"] = args.cautela_praga
+
     contagem = classificar_e_organizar(
-        caminhos, args.destino, args.checkpoint, args.metadados, args.limiar_confianca
+        caminhos, args.destino, args.checkpoint, args.metadados, args.limiar_confianca, vies_cautela or None
     )
 
     print("\n" + "=" * 60)

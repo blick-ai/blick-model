@@ -86,7 +86,19 @@ def montar_mascara_status(meta, device):
     return mascara
 
 
-def classificar_imagem(caminho, modelo, transform, meta, device, mascara_status=None):
+def classificar_imagem(caminho, modelo, transform, meta, device, mascara_status=None, vies_cautela=None):
+    """
+    vies_cautela: dict opcional tipo {"doenca": 0.15, "praga": 0.05} — soma
+    esse valor na probabilidade de cada status ANTES de escolher o
+    vencedor, sem mudar o modelo em si. Existe porque, pro caso de uso
+    real (alerta de lavoura), errar dizendo "saudavel" quando na verdade
+    esta doente e um erro muito mais caro do que o oposto — e isso pode
+    ser calibrado sem precisar de mais fotos de doenca de campo (que a
+    Mauá dificilmente vai ter, por ser uma plantacao bem cuidada).
+    A confianca reportada continua sendo a probabilidade ORIGINAL (sem o
+    viés), pra nao inflar artificialmente o numero — só a decisão final
+    e influenciada.
+    """
     img = Image.open(caminho).convert("RGB")
     x = transform(img).unsqueeze(0).to(device)
 
@@ -94,7 +106,14 @@ def classificar_imagem(caminho, modelo, transform, meta, device, mascara_status=
         saida_status, saida_subtipo = modelo(x)
         prob_status = torch.softmax(saida_status, dim=1)[0]
 
-    idx_status = int(prob_status.argmax().item())
+    if vies_cautela:
+        prob_ajustada = prob_status.clone()
+        for status, valor in vies_cautela.items():
+            prob_ajustada[STATUS_LABELS.index(status)] += valor
+        idx_status = int(prob_ajustada.argmax().item())
+    else:
+        idx_status = int(prob_status.argmax().item())
+
     status_previsto = STATUS_LABELS[idx_status]
 
     resultado = {
@@ -158,6 +177,13 @@ def main():
     parser.add_argument("--imagem", default=None, help="Caminho de uma única imagem.")
     parser.add_argument("--pasta", default=None, help="Caminho de uma pasta com várias imagens.")
     parser.add_argument("--saida-csv", default=None, help="Se informado, salva os resultados em CSV (útil no modo --pasta).")
+    parser.add_argument("--cautela-doenca", type=float, default=0.25,
+                         help="Soma esse valor na probabilidade de 'doença' antes de decidir — "
+                              "reduz falso-negativo (dizer saudável quando está doente). Padrão 0.25, "
+                              "calibrado nos testes de jul/2026 (corrigiu 4 de 9 casos de fronteira "
+                              "sem gerar alarme falso nos saudáveis reais). Use 0 para desativar.")
+    parser.add_argument("--cautela-praga", type=float, default=0.0,
+                         help="Mesma ideia, para 'praga'.")
     args = parser.parse_args()
 
     if not args.imagem and not args.pasta:
@@ -182,10 +208,16 @@ def main():
         ]
         print(f"[INFERIR] {len(caminhos)} imagem(ns) encontrada(s) em {args.pasta}.")
 
+    vies_cautela = {}
+    if args.cautela_doenca:
+        vies_cautela["doenca"] = args.cautela_doenca
+    if args.cautela_praga:
+        vies_cautela["praga"] = args.cautela_praga
+
     resultados = []
     for caminho in caminhos:
         try:
-            r = classificar_imagem(caminho, modelo, transform, meta, device, mascara_status)
+            r = classificar_imagem(caminho, modelo, transform, meta, device, mascara_status, vies_cautela or None)
         except Exception as e:
             print(f"\n{os.path.basename(caminho)}: erro ao processar ({e})")
             continue
