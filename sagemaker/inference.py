@@ -141,11 +141,27 @@ def predict_fn(input_object, model_artifacts):
     with torch.no_grad():
         saida_status, saida_subtipo = modelo(x)
         prob_status = torch.softmax(saida_status, dim=1)[0]
-        prob_subtipo = torch.softmax(saida_subtipo, dim=1)[0]
 
     idx_status = int(prob_status.argmax().item())
     status_previsto = STATUS_LABELS[idx_status]
 
+    resultado = {
+        "status_geral": status_previsto,
+        "confianca_status_geral": round(prob_status[idx_status].item(), 4),
+        "probabilidades_status_geral": {
+            STATUS_LABELS[i]: round(prob_status[i].item(), 4) for i in range(len(STATUS_LABELS))
+        },
+    }
+
+    # se o checkpoint foi treinado sem a cabeca de subtipo (--treinar-subtipo
+    # nao usado no train.py), meta["idx_para_classe"] vem vazio — nao ha
+    # subtipo pra reportar, e tudo bem, esse e o modo em producao hoje
+    if not meta.get("subtipo_treinado", True) or not meta.get("idx_para_classe"):
+        resultado["subtipo"] = None
+        resultado["confianca_subtipo"] = None
+        return resultado
+
+    prob_subtipo = torch.softmax(saida_subtipo, dim=1)[0]
     idx_subtipo = int(prob_subtipo.argmax().item())
     if mascara_status is not None:
         vetor_mascara = mascara_status[status_previsto]
@@ -153,15 +169,9 @@ def predict_fn(input_object, model_artifacts):
             prob_subtipo_mascarada = prob_subtipo.masked_fill(~vetor_mascara, float("-inf"))
             idx_subtipo = int(prob_subtipo_mascarada.argmax().item())
 
-    return {
-        "status_geral": status_previsto,
-        "confianca_status_geral": round(prob_status[idx_status].item(), 4),
-        "subtipo": meta["idx_para_classe"][str(idx_subtipo)],
-        "confianca_subtipo": round(prob_subtipo[idx_subtipo].item(), 4),
-        "probabilidades_status_geral": {
-            STATUS_LABELS[i]: round(prob_status[i].item(), 4) for i in range(len(STATUS_LABELS))
-        },
-    }
+    resultado["subtipo"] = meta["idx_para_classe"][str(idx_subtipo)]
+    resultado["confianca_subtipo"] = round(prob_subtipo[idx_subtipo].item(), 4)
+    return resultado
 
 
 # ---------------------------------------------------------------------------

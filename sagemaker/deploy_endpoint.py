@@ -73,12 +73,18 @@ def enviar_para_s3_se_necessario(caminho_ou_uri, bucket, region):
     return f"s3://{bucket}/{chave}"
 
 
-def deploy(model_tar, role_arn, endpoint_name, bucket, region, instance_type, modo, memoria_mb):
+def deploy(model_tar, role_arn, endpoint_name, bucket, region, instance_type, modo, memoria_mb, usar_tags=True):
     model_s3_uri = enviar_para_s3_se_necessario(model_tar, bucket, region)
     image_uri = montar_image_uri(region)
     print(f"[DEPLOY] Container gerenciado: {image_uri}")
     print(f"[DEPLOY] Modo: {modo}"
           + (f" ({memoria_mb}MB)" if modo == "serverless" else f" ({instance_type})"))
+
+    tags_kwargs = {"Tags": TAGS} if usar_tags else {}
+    if not usar_tags:
+        print("[DEPLOY] AVISO: rodando SEM tags (--sem-tags) — a conta bloqueou "
+              "sagemaker:AddTags pro seu usuário. Depois de criar, tente taguear "
+              "manualmente pelo console, ou peça pro professor resolver a permissão.")
 
     sm = boto3.client("sagemaker", region_name=region)
     timestamp = time.strftime("%Y%m%d%H%M%S")
@@ -93,7 +99,7 @@ def deploy(model_tar, role_arn, endpoint_name, bucket, region, instance_type, mo
             "ModelDataUrl": model_s3_uri,
         },
         ExecutionRoleArn=role_arn,
-        Tags=TAGS,
+        **tags_kwargs,
     )
 
     if modo == "serverless":
@@ -121,7 +127,7 @@ def deploy(model_tar, role_arn, endpoint_name, bucket, region, instance_type, mo
     sm.create_endpoint_config(
         EndpointConfigName=config_name,
         ProductionVariants=[variant],
-        Tags=TAGS,
+        **tags_kwargs,
     )
 
     endpoint_existe = False
@@ -139,7 +145,7 @@ def deploy(model_tar, role_arn, endpoint_name, bucket, region, instance_type, mo
         if modo == "realtime":
             print("[DEPLOY] IMPORTANTE: modo 'realtime' fica RODANDO (e sendo cobrado) até vocês "
                   "deletarem — não esqueçam de derrubar depois do teste se não for usar de imediato.")
-        sm.create_endpoint(EndpointName=endpoint_name, EndpointConfigName=config_name, Tags=TAGS)
+        sm.create_endpoint(EndpointName=endpoint_name, EndpointConfigName=config_name, **tags_kwargs)
 
     print("[DEPLOY] Aguardando o endpoint ficar 'InService'...")
     waiter = sm.get_waiter("endpoint_in_service")
@@ -170,10 +176,13 @@ def main():
     parser.add_argument("--instance-type", default="ml.t2.medium",
                          help="Só usado no modo 'realtime'. ml.t2.medium é a opção mais barata típica — "
                               "confira antes quais tipos a conta acadêmica permite.")
+    parser.add_argument("--sem-tags", action="store_true",
+                         help="Cria os recursos sem tags — use se der AccessDeniedException em "
+                              "sagemaker:AddTags. Depois, tente tagueá-los manualmente pelo console.")
     args = parser.parse_args()
 
     deploy(args.model_tar, args.role_arn, args.endpoint_name, args.bucket, args.region,
-           args.instance_type, args.modo, args.memoria_mb)
+           args.instance_type, args.modo, args.memoria_mb, usar_tags=not args.sem_tags)
 
 
 if __name__ == "__main__":
