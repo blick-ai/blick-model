@@ -37,6 +37,7 @@ from PIL import Image
 from torchvision import models, transforms
 
 STATUS_LABELS = ["saudavel", "praga", "doenca", "nao_milho"]
+VIES_CAUTELA = {"doenca": 0.25, "praga": 0.0}
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +143,15 @@ def predict_fn(input_object, model_artifacts):
         saida_status, saida_subtipo = modelo(x)
         prob_status = torch.softmax(saida_status, dim=1)[0]
 
-    idx_status = int(prob_status.argmax().item())
+    if VIES_CAUTELA:
+        prob_ajustada = prob_status.clone()
+        for status, valor in VIES_CAUTELA.items():
+            if valor:
+                prob_ajustada[STATUS_LABELS.index(status)] += valor
+        idx_status = int(prob_ajustada.argmax().item())
+    else:
+        idx_status = int(prob_status.argmax().item())
+
     status_previsto = STATUS_LABELS[idx_status]
 
     resultado = {
