@@ -156,7 +156,7 @@ FRACAO_TREINO_CAMPO_PADRAO = 0.7  # resto vai pra validacao
 LIMIAR_CLASSE_MINIMA_CAMPO = 2    # classes de campo com ate esse tanto de exemplo vao INTEIRAS pro treino
 
 
-def dividir_campo_treino_validacao(df_campo, fracao_treino, seed):
+def dividir_campo_treino_validacao(df_campo, fracao_treino, seed, limiar_treino_total=LIMIAR_CLASSE_MINIMA_CAMPO):
     """
     Divide as imagens de campo entre treino e validacao, em vez da regra
     antiga (100% pra validacao). Reservar tudo pra validacao parecia mais
@@ -166,17 +166,24 @@ def dividir_campo_treino_validacao(df_campo, fracao_treino, seed):
     erra (ver conversa sobre as fotos do FOTOS.zip saindo como
     doenca/praga quando pareciam saudaveis a olho nu).
 
-    Classes com ate LIMIAR_CLASSE_MINIMA_CAMPO exemplos vao INTEIRAS pro
-    treino: com tao pouco dado, uma validacao de 1-2 imagem(ns) tem poder
-    estatistico proximo de zero mesmo (foi o que aconteceu com Saudavel,
-    n=2 — a divisao 70/30 mandou so 1 pro treino), entao o exemplo vale
-    mais como sinal de treino do que como medida de validacao.
+    Classes com ate limiar_treino_total exemplos vao INTEIRAS pro treino:
+    com pouco dado, uma validacao de poucas imagens tem poder estatistico
+    proximo de zero mesmo, entao o exemplo vale mais como sinal de treino
+    do que como medida de validacao. Por padrao esse limiar e bem baixo
+    (so cobre casos extremos, ex: Saudavel com n=2). Mas para classes
+    estruturalmente escassas (ex: Doenca, com ~20 exemplos de campo no
+    total), vale subir esse limiar de proposito via --limiar-treino-total,
+    aceitando abrir mao de uma validacao "honesta" dessa classe em troca
+    do modelo ver TODO o pouco dado positivo disponivel (ver conversa de
+    05-06/08/2026 — 16 de 17 fotos de doenca confirmadas visualmente
+    estavam saindo erradas em producao, varias por nunca terem entrado
+    no treino, sempre as mesmas por causa da seed fixa).
     """
     from sklearn.model_selection import train_test_split
 
     partes_treino, partes_val = [], []
     for _, grupo in df_campo.groupby("classe"):
-        if len(grupo) <= LIMIAR_CLASSE_MINIMA_CAMPO or fracao_treino >= 1:
+        if len(grupo) <= limiar_treino_total or fracao_treino >= 1:
             partes_treino.append(grupo)
             continue
         if fracao_treino <= 0:
@@ -200,7 +207,8 @@ def dividir_campo_treino_validacao(df_campo, fracao_treino, seed):
 
 
 def carregar_e_dividir(manifest_path, val_fraction=0.15, seed=42, limit=None,
-                        fracao_treino_campo=FRACAO_TREINO_CAMPO_PADRAO):
+                        fracao_treino_campo=FRACAO_TREINO_CAMPO_PADRAO,
+                        limiar_treino_total=LIMIAR_CLASSE_MINIMA_CAMPO):
     df = pd.read_csv(manifest_path)
 
     antes = len(df)
@@ -227,10 +235,19 @@ def carregar_e_dividir(manifest_path, val_fraction=0.15, seed=42, limit=None,
         df_campo = df[tem_campo]
         df_resto = df[~tem_campo]
 
-        treino_campo, val_campo = dividir_campo_treino_validacao(df_campo, fracao_treino_campo, seed)
+        treino_campo, val_campo = dividir_campo_treino_validacao(
+            df_campo, fracao_treino_campo, seed, limiar_treino_total
+        )
         print(f"[TREINO] {n_campo} imagem(ns) de origem de campo: "
               f"{len(treino_campo)} para treino, {len(val_campo)} para validação "
               f"(fração configurável via --fracao-treino-campo, padrão {fracao_treino_campo:.0%}).")
+        if limiar_treino_total > LIMIAR_CLASSE_MINIMA_CAMPO:
+            classes_treino_total = df_campo.groupby("classe").size()
+            classes_treino_total = classes_treino_total[classes_treino_total <= limiar_treino_total]
+            if len(classes_treino_total) > 0:
+                nomes = ", ".join(f"{c} (n={n})" for c, n in classes_treino_total.items())
+                print(f"[TREINO] --limiar-treino-total={limiar_treino_total} ativo — foram "
+                      f"INTEIRAS pro treino (sem reservar validação): {nomes}")
 
         # o restante (internet/prof_wanderson) continua 100% no treino como
         # antes — o campo e que precisava de ajuste, nao essa parte
@@ -283,6 +300,7 @@ def treinar(args):
     treino_df, val_df = carregar_e_dividir(
         args.manifest, val_fraction=args.val_fraction, limit=args.limit,
         fracao_treino_campo=args.fracao_treino_campo, seed=args.seed,
+        limiar_treino_total=args.limiar_treino_total,
     )
 
     if args.treinar_subtipo:
@@ -507,6 +525,12 @@ def main():
                          help=f"Fração das fotos de campo (Klar/PlantDoc) usada no treino, o resto "
                               f"vai pra validação (padrão: {FRACAO_TREINO_CAMPO_PADRAO:.0%}). "
                               f"Use 0 pra voltar ao comportamento antigo (100%% validação).")
+    parser.add_argument("--limiar-treino-total", type=int, default=LIMIAR_CLASSE_MINIMA_CAMPO,
+                         help=f"Classes de campo com ate esse numero de exemplos vao INTEIRAS pro "
+                              f"treino, sem reservar nada pra validacao (padrão: {LIMIAR_CLASSE_MINIMA_CAMPO}, "
+                              f"cobre so casos extremos). Suba esse valor pra garantir que uma classe "
+                              f"estruturalmente escassa (ex: Doenca, ~20 exemplos) seja vista por "
+                              f"inteiro no treino — ao custo de nao medir validacao real dela.")
     parser.add_argument("--seed", type=int, default=42,
                          help="Semente aleatória — mesmo seed + mesmo dado + mesmo código = mesmo "
                               "resultado. Mude só se quiser testar sensibilidade a inicialização.")
