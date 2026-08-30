@@ -1,82 +1,49 @@
-# -*- coding: utf-8 -*-
 """
-empacotar_modelo.py
---------------------
-Empacota o checkpoint treinado (modelo_melhor.pth + metadados.json) junto
-com o inference.py num model.tar.gz no formato que o Amazon SageMaker
-espera para hospedar como endpoint, usando o container gerenciado de
-PyTorch (nao precisamos construir nem manter nossa propria imagem Docker).
+Empacota o modelo YOLO (pesos + script de inferencia) no formato que o
+SageMaker espera: um model.tar.gz com os pesos na raiz e o codigo de
+inferencia dentro de code/.
 
-ESTRUTURA GERADA DENTRO DO model.tar.gz:
-    model.tar.gz
-    ├── modelo_melhor.pth
-    ├── metadados.json
-    └── code/
-        └── inference.py
-
-Isso NAO faz o deploy sozinho — so gera o artefato que depois e enviado
-pro S3 e referenciado na criacao do SageMaker Model/Endpoint (proximo
-passo, quando vocês decidirem que o modelo esta maduro o suficiente pra
-valer o custo de um endpoint rodando).
-
-Exemplo de uso:
-    python3 empacotar_modelo.py \
-        --checkpoint ../training/checkpoints/modelo_melhor.pth \
-        --metadados ../training/checkpoints/metadados.json \
-        --inference ./inference.py \
-        --saida ./model.tar.gz
+Uso:
+    python3 empacotar_modelo.py --pesos weights.pt --saida model.tar.gz
 """
 
+import argparse
 import os
-import json
 import shutil
 import tarfile
-import argparse
+import tempfile
 
 
-def empacotar(checkpoint, metadados, inference, saida):
-    for caminho, nome in [(checkpoint, "checkpoint"), (metadados, "metadados"), (inference, "inference.py")]:
-        if not os.path.exists(caminho):
-            raise FileNotFoundError(f"{nome} não encontrado em: {caminho}")
+def empacotar(caminho_pesos: str, caminho_saida: str) -> None:
+    pasta_atual = os.path.dirname(os.path.abspath(__file__))
 
-    # confere que os metadados sao um JSON valido antes de empacotar —
-    # melhor falhar aqui do que descobrir so quando o endpoint subir
-    with open(metadados, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-    print(f"[EMPACOTAR] Metadados OK — backbone: {meta.get('backbone')}, "
-          f"img_size: {meta.get('img_size')}, subtipo_treinado: {meta.get('subtipo_treinado')}")
+    with tempfile.TemporaryDirectory() as tmp:
+        pasta_code = os.path.join(tmp, "code")
+        os.makedirs(pasta_code)
 
-    pasta_tmp = "_pacote_tmp"
-    if os.path.exists(pasta_tmp):
-        shutil.rmtree(pasta_tmp)
-    os.makedirs(os.path.join(pasta_tmp, "code"))
+        # os pesos vao na RAIZ do pacote, com nome fixo "best.pt" — o
+        # inference.py (model_fn) espera exatamente esse nome
+        shutil.copy(caminho_pesos, os.path.join(tmp, "best.pt"))
 
-    shutil.copy(checkpoint, os.path.join(pasta_tmp, "modelo_melhor.pth"))
-    shutil.copy(metadados, os.path.join(pasta_tmp, "metadados.json"))
-    shutil.copy(inference, os.path.join(pasta_tmp, "code", "inference.py"))
+        # script de inferencia + o modulo de agregacao que ele importa +
+        # as dependencias extras (ultralytics, opencv headless)
+        shutil.copy(os.path.join(pasta_atual, "inference.py"), os.path.join(pasta_code, "inference.py"))
+        shutil.copy(os.path.join(pasta_atual, "agregacao.py"), os.path.join(pasta_code, "agregacao.py"))
+        shutil.copy(
+            os.path.join(pasta_atual, "requirements.txt"),
+            os.path.join(pasta_code, "requirements.txt"),
+        )
 
-    with tarfile.open(saida, "w:gz") as tar:
-        for nome in os.listdir(pasta_tmp):
-            tar.add(os.path.join(pasta_tmp, nome), arcname=nome)
+        with tarfile.open(caminho_saida, "w:gz") as tar:
+            tar.add(tmp, arcname=".")
 
-    shutil.rmtree(pasta_tmp)
-
-    tamanho_mb = os.path.getsize(saida) / (1024 * 1024)
-    print(f"[EMPACOTAR] Pacote criado: {saida} ({tamanho_mb:.1f} MB)")
-    print("[EMPACOTAR] Próximo passo (quando decidirem fazer o deploy de verdade):")
-    print(f"  aws s3 cp {saida} s3://<seu-bucket>/blick/model.tar.gz")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Empacota o modelo treinado no formato do SageMaker.")
-    parser.add_argument("--checkpoint", default="../training/checkpoints/modelo_melhor.pth")
-    parser.add_argument("--metadados", default="../training/checkpoints/metadados.json")
-    parser.add_argument("--inference", default="./inference.py")
-    parser.add_argument("--saida", default="./model.tar.gz")
-    args = parser.parse_args()
-
-    empacotar(args.checkpoint, args.metadados, args.inference, args.saida)
+    tamanho_mb = os.path.getsize(caminho_saida) / (1024 * 1024)
+    print(f"Pacote criado: {caminho_saida} ({tamanho_mb:.1f} MB)")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Empacota o modelo YOLO pro SageMaker")
+    parser.add_argument("--pesos", required=True, help="Caminho pro arquivo weights.pt (best.pt)")
+    parser.add_argument("--saida", default="model.tar.gz", help="Nome do arquivo de saida")
+    args = parser.parse_args()
+    empacotar(args.pesos, args.saida)

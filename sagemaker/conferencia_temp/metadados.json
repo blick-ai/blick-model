@@ -1,0 +1,24 @@
+{
+  "subtipo_treinado": false,
+  "status_labels": [
+    "saudavel",
+    "praga",
+    "doenca",
+    "nao_milho"
+  ],
+  "classe_para_idx": {},
+  "idx_para_classe": {},
+  "classe_para_status": {},
+  "img_size": 160,
+  "backbone": "resnet18",
+  "normalizacao_media": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "normalizacao_desvio": [
+    0.229,
+    0.224,
+    0.225
+  ]
+}

@@ -1,0 +1,8 @@
+# opencv-python-headless (nao o "opencv-python" normal) e essencial aqui —
+# o ultralytics depende de opencv por baixo, e a versao normal do opencv
+# tenta carregar bibliotecas graficas (libGL) que NAO existem em containers
+# serverless/headless como o SageMaker. Sem essa linha especifica, o
+# deploy quebra com erro de "libGL.so.1: cannot open shared object file".
+opencv-python-headless>=4.9.0
+
+ultralytics>=8.3.0
