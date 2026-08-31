@@ -1,3 +1,12 @@
+# O container base do SageMaker (pytorch-inference:2.1.0) ja vem com
+# scipy pre-instalado, compilado contra numpy 1.x. Sem fixar isso aqui,
+# o pip instala o numpy mais novo (2.x) como dependencia do ultralytics,
+# o que QUEBRA o scipy ja existente no container (erro real que
+# encontramos: "AttributeError: _ARRAY_API not found" / "ImportError:
+# numpy.core.multiarray failed to import" — o worker nem consegue
+# inicializar). Fixar numpy<2 evita esse conflito de binario.
+numpy<2
+
 # opencv-python-headless (nao o "opencv-python" normal) e essencial aqui —
 # o ultralytics depende de opencv por baixo, e a versao normal do opencv
 # tenta carregar bibliotecas graficas (libGL) que NAO existem em containers

@@ -32,18 +32,25 @@ def model_fn(model_dir):
 
 
 def input_fn(request_body, content_type):
-    if content_type != "application/json":
-        raise ValueError(f"Content-Type nao suportado: {content_type}")
+    # o blick-api manda a imagem em bytes crus, com esse content-type —
+    # e o formato real que descobrimos em producao, testando de verdade
+    if content_type in ("application/x-image", "image/jpeg", "image/png", "image/jpg"):
+        imagem = Image.open(io.BytesIO(request_body)).convert("RGB")
+        return imagem
 
-    corpo = json.loads(request_body)
-    # aceita tanto "imagem_base64" (nosso padrao) quanto "image" (generico)
-    imagem_base64 = corpo.get("imagem_base64") or corpo.get("image")
-    if not imagem_base64:
-        raise ValueError("Corpo da requisicao precisa ter 'imagem_base64'")
+    # fallback: JSON com base64 (formato original que eu tinha assumido
+    # antes de testar contra o backend real — mantido por flexibilidade,
+    # caso algum outro chamador use esse formato)
+    if content_type == "application/json":
+        corpo = json.loads(request_body)
+        imagem_base64 = corpo.get("imagem_base64") or corpo.get("image")
+        if not imagem_base64:
+            raise ValueError("Corpo da requisicao precisa ter 'imagem_base64'")
+        image_bytes = base64.b64decode(imagem_base64)
+        imagem = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        return imagem
 
-    image_bytes = base64.b64decode(imagem_base64)
-    imagem = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    return imagem
+    raise ValueError(f"Content-Type nao suportado: {content_type}")
 
 
 def predict_fn(imagem, modelo):

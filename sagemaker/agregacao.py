@@ -1,74 +1,65 @@
 """
 Regra de "alerta inteligente" — transforma varias deteccoes por objeto
 (YOLO, uma imagem pode ter varias plantas/caixas) num status geral unico
-pra planta/foto, priorizando nao deixar passar sinal de alerta:
+pra planta/foto, priorizando nao deixar passar sinal de alerta.
 
-1. Conta quantas caixas de cada classe (saudavel/praga/doenca)
-2. Se (praga + doenca) tiver MAIS caixas que saudavel -> vence a classe
-   de alerta com mais caixas entre praga/doenca
-3. Senao (saudavel tem mais ou igual caixas) -> se a caixa de MAIOR
-   confianca entre TODAS as deteccoes for de praga/doenca, ela vence
-   mesmo em minoria (nao deixa uma deteccao forte se diluir)
-4. Caso nenhuma das duas condicoes acima dispare -> saudavel vence
+Taxonomia simplificada pra 2 classes (decisao do projeto: praga e
+doenca deixaram de ser distinguidas, viram "nao_saudavel" junto):
+
+1. Conta quantas caixas de cada classe (saudavel / nao_saudavel)
+2. Quem tiver MAIS caixas vence
+3. Em empate de quantidade -> quem tiver a caixa de MAIOR confianca
+   individual vence (nao deixa uma deteccao forte se diluir num empate)
+4. Em empate total (quantidade E confianca) -> nao_saudavel vence, por
+   seguranca (prefere falso alerta a deixar passar problema real)
 """
 
+# "pest" mapeia pra nao_saudavel tambem, de proposito — mesmo que o
+# modelo atual (2 classes) nao tenha mais essa saida, mapear ela aqui
+# garante que, se um modelo futuro voltar a distinguir praga como
+# categoria propria, o sistema nao quebra nem ignora silenciosamente
+# essas deteccoes — elas so caem automaticamente em "nao_saudavel"
 MAPA_CLASSES_ROBOFLOW = {
     "healthy": "saudavel",
-    "disease": "doenca",
-    "pest": "praga",
+    "disease": "nao_saudavel",
+    "pest": "nao_saudavel",
 }
 
 
 def agregar_deteccoes(deteccoes):
     """
-    deteccoes: lista de dicts {"classe": "saudavel"|"praga"|"doenca", "confianca": float}
-    Retorna: (status_geral, confianca_do_status, probabilidades_por_classe)
+    deteccoes: lista de dicts {"classe": "saudavel"|"nao_saudavel", "confianca": float}
+    Retorna: (status_geral, confianca_do_status, probabilidades_por_classe, motivo)
     """
     if not deteccoes:
         # nenhuma deteccao na imagem inteira -> nao tem planta de milho
         # reconhecivel (esse modelo assume que a etapa 1 ja confirmou
         # que e milho; se nao achou nada aqui, e sinal de imagem ruim)
-        probabilidades_vazias = {"saudavel": 0.0, "praga": 0.0, "doenca": 0.0, "nao_milho": 1.0}
+        probabilidades_vazias = {"saudavel": 0.0, "nao_saudavel": 0.0, "nao_milho": 1.0}
         return "nao_milho", 0.0, probabilidades_vazias, "sem_deteccao"
 
-    contagem = {"saudavel": 0, "praga": 0, "doenca": 0}
-    maior_confianca_por_classe = {"saudavel": 0.0, "praga": 0.0, "doenca": 0.0}
+    contagem = {"saudavel": 0, "nao_saudavel": 0}
+    maior_confianca_por_classe = {"saudavel": 0.0, "nao_saudavel": 0.0}
 
     for d in deteccoes:
         contagem[d["classe"]] += 1
         if d["confianca"] > maior_confianca_por_classe[d["classe"]]:
             maior_confianca_por_classe[d["classe"]] = d["confianca"]
 
-    caixas_alerta = contagem["praga"] + contagem["doenca"]
-    caixas_saudavel = contagem["saudavel"]
-
-    if caixas_alerta > caixas_saudavel:
-        # entre praga/doenca: primeiro quem tem MAIS caixas vence; se
-        # empatar em quantidade, quem tiver MAIOR confianca vence; se
-        # empatar nos dois, doenca vence por padrao (desempate final)
-        if contagem["praga"] > contagem["doenca"]:
-            vencedora = "praga"
-        elif contagem["doenca"] > contagem["praga"]:
-            vencedora = "doenca"
-        else:
-            # empate na quantidade de caixas -> decide por confianca
-            if maior_confianca_por_classe["praga"] > maior_confianca_por_classe["doenca"]:
-                vencedora = "praga"
-            else:
-                # doenca vence tanto se tiver confianca maior quanto em empate total
-                vencedora = "doenca"
+    if contagem["nao_saudavel"] > contagem["saudavel"]:
+        vencedora = "nao_saudavel"
+        motivo = "quantidade"
+    elif contagem["saudavel"] > contagem["nao_saudavel"]:
+        vencedora = "saudavel"
         motivo = "quantidade"
     else:
-        # saudavel tem mais ou igual caixas -> confere se alguma deteccao
-        # de alerta tem confianca MAIOR que a maior confianca de saudavel
-        maior_alerta = max(maior_confianca_por_classe["praga"], maior_confianca_por_classe["doenca"])
-        if maior_alerta > maior_confianca_por_classe["saudavel"]:
-            # mesmo criterio de desempate: doenca vence em empate de confianca
-            vencedora = "praga" if maior_confianca_por_classe["praga"] > maior_confianca_por_classe["doenca"] else "doenca"
-            motivo = "confianca"
-        else:
+        # empate na quantidade de caixas -> decide por confianca; em
+        # empate total, nao_saudavel vence por seguranca
+        if maior_confianca_por_classe["saudavel"] > maior_confianca_por_classe["nao_saudavel"]:
             vencedora = "saudavel"
-            motivo = "saudavel_predominante"
+        else:
+            vencedora = "nao_saudavel"
+        motivo = "confianca"
 
     confianca_vencedora = maior_confianca_por_classe[vencedora]
     total_caixas = sum(contagem.values())
