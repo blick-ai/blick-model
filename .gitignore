@@ -235,3 +235,5 @@ checkpoints/
 *.pth
 *.csv
 *.pyc
+*.zip
+*.tar.gz
